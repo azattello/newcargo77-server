@@ -1,0 +1,7 @@
+{
+    "serverPort" : 3001,
+    "dbUrl": "mongodb+srv://azatabdykalli:98z5xFdxWmIHh8zE@cargo77.gocxxej.mongodb.net/?retryWrites=true&w=majority&appName=cargo77",
+    "secretKey" : "mern-secret-key",
+    "vapidPublicKey": "BJtBjK8np_BeUhsJubD6JLvmmGSDGPWlbOC_wqrY6Y7Qnsv4NorYvAAdV3-so5slfk1aru_j9MehVv3ggqmAm90",
+    "vapidPrivateKey": "JsnAVVjnQj7k0CE-fRK3LuAC_T_CPrF68Xt7-8GuZWs"
+}

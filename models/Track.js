@@ -9,11 +9,13 @@ const trackSchema = new Schema({
   user: { type: String }, // телефон как строка
   history: {
     type: [{
+      _id: { type: Schema.Types.ObjectId, default: () => new mongoose.Types.ObjectId() },
       status: { type: Schema.Types.ObjectId, ref: 'Status' },
       date: { type: Date, default: Date.now }
     }],
     default: []
   },
+  notifiedHistoryIds: { type: [Schema.Types.ObjectId], default: [] }, // для отслеживания уведомленных статусов
   price: { type: Number, default: 0 },   // если нужно для фронта
   weight: { type: Number, default: 0 },
   createdAt: { type: Date, default: Date.now },

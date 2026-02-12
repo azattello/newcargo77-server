@@ -126,17 +126,41 @@ router.get('/:userId/getBookmarks', async (req, res) => {
                 bookmark.trackId = track._id;
                 bookmark.currentStatus = track.status && track.status._id ? track.status._id : track.status;
 
-                // Ограничиваем историю до последних historyLimit записей
+                // Фильтруем историю - показываем только прошедшие статусы (дата не в будущем)
                 const fullHistory = Array.isArray(track.history) ? track.history : [];
-                const hasMoreHistory = fullHistory.length > historyLimit;
-                const history = fullHistory.slice(-historyLimit);
+                const now = new Date();
+                const filteredHistory = fullHistory.filter(h => {
+                    if (!h.date) return true; // Если нет даты, показываем
+                    const historyDate = new Date(h.date);
+                    return historyDate <= now; // Только если дата прошла
+                });
+
+                // Определяем currentStatus: если последний статус в будущем, используем предыдущий
+                let currentStatusForBookmark = track.status;
+                if (track.history && track.history.length > 0) {
+                    const lastHistoryItem = track.history[track.history.length - 1];
+                    if (lastHistoryItem.date) {
+                        const lastHistoryDate = new Date(lastHistoryItem.date);
+                        if (lastHistoryDate > now) {
+                            // Последний статус в будущем, берем предпоследний
+                            const lastVisibleHistory = filteredHistory[filteredHistory.length - 1];
+                            if (lastVisibleHistory && lastVisibleHistory.status) {
+                                currentStatusForBookmark = lastVisibleHistory.status;
+                            }
+                        }
+                    }
+                }
+
+                // Ограничиваем отфильтрованную историю до последних historyLimit записей
+                const hasMoreHistory = filteredHistory.length > historyLimit;
+                const history = filteredHistory.slice(-historyLimit);
 
                 // В ответ отправляем populated status и ограниченную историю (history.status — тоже populated)
                 allBookmarks.push({
                     type: 'found',
                     _id: bookmark._id,
                     trackNumber: bookmark.trackNumber,
-                    currentStatus: track.status,
+                    currentStatus: currentStatusForBookmark,
                     description: bookmark.description,
                     history,
                     hasMoreHistory,
@@ -148,21 +172,107 @@ router.get('/:userId/getBookmarks', async (req, res) => {
         // Сохраняем пользователя с обновленными данными закладок (trackId/currentStatus)
         await user.save();
 
-        // ✅ Подсчитываем статусы для ВСЕХ закладок (не только текущей страницы)
-        const Status = require('../models/Status');
+        // ✅ Проверяем "созревшие" статусы (у которых дата уже прошла, но они еще не уведомлены)
+        const Notification = require('../models/Notification');
+        const { sendPushToUser } = require('../utils/pushHelper');
+        const now = new Date();
+
+        for (const bookmark of bookmarks) {
+            const formattedTrackNumber = String(bookmark.trackNumber || '').replace(/\s+/g, '').toLowerCase();
+            const track = await Track.findOne({ track: { $regex: new RegExp(formattedTrackNumber, 'i') } }).populate('history.status', 'statusText');
+
+            if (track && track.history && track.history.length > 0) {
+                // Ищем статусы, которые "созрели" (дата прошла) и еще не были уведомлены
+                const ripeStatuses = track.history.filter(h => {
+                    if (!h.date || !h._id) return false;
+                    const historyDate = new Date(h.date);
+                    const isRipe = historyDate <= now;
+                    const isNotNotified = !track.notifiedHistoryIds || !track.notifiedHistoryIds.includes(h._id);
+                    return isRipe && isNotNotified;
+                });
+
+                // Если есть созревшие статусы, отправляем уведомление
+                if (ripeStatuses.length > 0) {
+                    const lastRipeStatus = ripeStatuses[ripeStatuses.length - 1];
+                    const statusText = lastRipeStatus.status?.statusText || 'Статус обновлён';
+                    const message = `трек ${bookmark.trackNumber} - добавлен новый статус ${statusText}`;
+
+                    try {
+                        // Создаем уведомление
+                        const notification = new Notification({
+                            userId: userId,
+                            type: 'parcels',
+                            title: 'Обновление статуса посылки',
+                            message,
+                            isRead: false,
+                            data: {
+                                trackNumber: bookmark.trackNumber,
+                                status: statusText,
+                                statusId: lastRipeStatus.status?._id
+                            }
+                        });
+
+                        await notification.save();
+                        console.log(`✅ Уведомление о созревшем статусе создано для пользователя ${userId}, трек ${bookmark.trackNumber}`);
+                        
+                        // Отправляем push уведомление
+                        await sendPushToUser(user, 'Обновление статуса посылки', message, {
+                            trackNumber: bookmark.trackNumber,
+                            status: statusText
+                        });
+
+                        // Добавляем все "созревшие" статусы в notifiedHistoryIds
+                        const ripeStatusIds = ripeStatuses.map(h => h._id);
+                        track.notifiedHistoryIds = [...(track.notifiedHistoryIds || []), ...ripeStatusIds];
+                        await track.save();
+                    } catch (err) {
+                        console.error(`❌ Ошибка при отправке уведомления для трека ${bookmark.trackNumber}:`, err.message);
+                    }
+                }
+            }
+        }
+
+        // ✅ Подсчитываем статусы для ВСЕХ закладок (не только текущей страницы) - только ВИДИМЫЕ статусы
         const statusCounts = {};
         let notFoundCount = 0;
 
         await Promise.all(
           bookmarks.map(async (bookmark) => {
             const formattedTrackNumber = String(bookmark.trackNumber || '').replace(/\s+/g, '').toLowerCase();
-            const track = await Track.findOne({ track: { $regex: new RegExp(formattedTrackNumber, 'i') } }).populate('status', 'statusText').lean();
+            const track = await Track.findOne({ track: { $regex: new RegExp(formattedTrackNumber, 'i') } }).populate('status', 'statusText').populate('history.status', 'statusText').lean();
 
             if (!track) {
               notFoundCount++;
-            } else if (track.status && track.status.statusText) {
-              const statusText = track.status.statusText;
-              statusCounts[statusText] = (statusCounts[statusText] || 0) + 1;
+            } else {
+              // Фильтруем историю - считаем только прошедшие статусы
+              const now = new Date();
+              const fullHistory = Array.isArray(track.history) ? track.history : [];
+              const filteredHistory = fullHistory.filter(h => {
+                if (!h.date) return true;
+                const historyDate = new Date(h.date);
+                return historyDate <= now;
+              });
+
+              // Определяем видимый статус
+              let visibleStatus = track.status;
+              if (track.history && track.history.length > 0) {
+                const lastHistoryItem = track.history[track.history.length - 1];
+                if (lastHistoryItem.date) {
+                  const lastHistoryDate = new Date(lastHistoryItem.date);
+                  if (lastHistoryDate > now) {
+                    // Последний статус в будущем, берем предпоследний видимый
+                    const lastVisibleHistory = filteredHistory[filteredHistory.length - 1];
+                    if (lastVisibleHistory && lastVisibleHistory.status) {
+                      visibleStatus = lastVisibleHistory.status;
+                    }
+                  }
+                }
+              }
+
+              if (visibleStatus && visibleStatus.statusText) {
+                const statusText = visibleStatus.statusText;
+                statusCounts[statusText] = (statusCounts[statusText] || 0) + 1;
+              }
             }
           })
         );

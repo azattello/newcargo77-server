@@ -7,9 +7,10 @@ const jwt = require("jsonwebtoken")
 const config = require("config")
 const mongoose = require('mongoose'); // Добавьте эту строку для импорта mongoose
 const { sendPushByUserId } = require('../utils/pushHelper');
+const authMiddleware = require('../middleware/auth.middleware');
 
 
-router.get('/users', async (req, res) => {
+router.get('/users', authMiddleware, async (req, res) => {
   const page = parseInt(req.query.page) || 1;
   const limit = parseInt(req.query.limit) || 100;
   const sortByDate = req.query.sortByDate || 'latest';
@@ -22,6 +23,27 @@ router.get('/users', async (req, res) => {
   try {
     const startIndex = (page - 1) * limit;
     let query = {};
+
+    // Получаем текущего пользователя
+    const currentUser = await User.findById(req.user.id);
+    if (!currentUser) {
+      return res.status(401).json({ message: 'Пользователь не найден' });
+    }
+
+    // ========== ЛОГИКА ДОСТУПА ==========
+    // Если пользователь имеет роль 'filial', показываем только пользователей этого филиала
+    if (currentUser.role === 'filial') {
+      const filial = await Filial.findOne({ userId: currentUser._id });
+      if (filial) {
+        query.selectedFilial = filial.filialText; // Фильтруем по названию филиала
+      } else {
+        // Если филиал не найден, не показываем никого (или показываем только себя)
+        query._id = currentUser._id;
+      }
+    }
+    // Если админ - может видеть всех (query остается пустой или с фильтрами админа)
+    // Филиальный пользователь не может использовать фильтр по филиалу (игнорируем filterByFilial для филиала)
+    // ====================================
 
     // Поиск по имени, фамилии или номеру телефона
     if (searchQuery) {
@@ -36,13 +58,13 @@ router.get('/users', async (req, res) => {
       }
     }
 
-    // Фильтрация по роли
-    if (filterByRole) {
+    // Фильтрация по роли (только для админа)
+    if (filterByRole && currentUser.role === 'admin') {
       query.role = filterByRole;
     }
 
-    // Фильтрация по филиалу
-    if (filterByFilial) {
+    // Фильтрация по филиалу (только для админа)
+    if (filterByFilial && currentUser.role === 'admin') {
       query.selectedFilial = filterByFilial;
     }
 
@@ -53,6 +75,9 @@ router.get('/users', async (req, res) => {
     } else if (sortByDate === 'oldest') {
       sortOptions.createdAt = 1;
     }
+
+    // Получаем ОБЩЕЕ количество пользователей ДО пагинации
+    const totalCount = await User.countDocuments(query);
 
     // Выполняем запрос к базе данных с сортировкой, фильтрацией и пагинацией
     let users = await User.find(query)
@@ -90,17 +115,11 @@ router.get('/users', async (req, res) => {
       usersWithCounts.sort((a, b) => b.totalActivity - a.totalActivity);
     }
 
-    // Подсчитываем общее количество пользователей после фильтрации по счетам
-    const totalCount = usersWithCounts.length;
-
-    // Пагинация уже после фильтрации по счетам
-    const paginatedUsers = usersWithCounts.slice(startIndex, startIndex + limit);
-
     res.json({
       totalCount,
       currentPage: page,
       totalPages: Math.ceil(totalCount / limit),
-      users: paginatedUsers
+      users: usersWithCounts
     });
   } catch (error) {
     console.error(error);
@@ -201,7 +220,6 @@ router.get('/byPersonalId/:personalId', async (req, res) => {
 });
 
 // Admin-only lookup: возвращает полный профиль (invoices, tracks) по personalId
-const authMiddleware = require('../middleware/auth.middleware');
 router.get('/byPersonalId/admin/:personalId', authMiddleware, async (req, res) => {
   try {
     // проверим роль пользователя

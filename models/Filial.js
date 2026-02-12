@@ -2,6 +2,7 @@ const mongoose = require('mongoose');
 
 const FilialSchema = new mongoose.Schema({
   filialText: { type: String, required: true },
+  filialName: { type: String, default: '' }, // Новое поле - отображаемое имя филиала
   userPhone: { type: Number, required: true },
   filialId: { type: String, required: true },
   filialAddress : { type: String, required: true },

@@ -6,7 +6,7 @@ const User = require('../models/User');
 // Маршрут для добавления нового филиала
 router.post('/addFilial', async (req, res) => {
     try {
-      const { filialId, filialText, userPhone, filialAddress } = req.body;
+      const { filialId, filialText, filialName, userPhone, filialAddress } = req.body;
       
       // Проверяем, существует ли пользователь с указанным номером телефона
       const user = await User.findOne({ phone: userPhone });
@@ -30,7 +30,7 @@ router.post('/addFilial', async (req, res) => {
       await user.save();
   
       // Создаем новый филиал
-      const newFilial = new Filial({ filialId, filialText, userPhone, filialAddress, userId: user._id  });
+      const newFilial = new Filial({ filialId, filialText, filialName: filialName || '', userPhone, filialAddress, userId: user._id  });
       await newFilial.save();
   
       res.status(201).json({ message: 'Филиал успешно добавлен' });
@@ -97,6 +97,34 @@ router.delete('/deleteFilial/:id', async (req, res) => {
   }
 });
 
+// Маршрут для обновления филиала
+router.put('/updateFilial/:id', async (req, res) => {
+  try {
+    const filialId = req.params.id;
+    const { filialId: newFilialId, filialText, filialName, userPhone, filialAddress } = req.body;
+
+    // Находим филиал по его идентификатору
+    const filial = await Filial.findById(filialId);
+    if (!filial) {
+      return res.status(404).json({ message: 'Филиал не найден' });
+    }
+
+    // Обновляем поля филиала
+    if (newFilialId) filial.filialId = newFilialId;
+    if (filialText) filial.filialText = filialText;
+    if (filialName !== undefined) filial.filialName = filialName;
+    if (userPhone) filial.userPhone = userPhone;
+    if (filialAddress) filial.filialAddress = filialAddress;
+
+    // Сохраняем обновленный филиал
+    await filial.save();
+
+    res.status(200).json({ message: 'Филиал успешно обновлен', filial });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: 'Ошибка сервера' });
+  }
+});
 
 // Маршрут для получения данных о филиале по номеру телефона пользователя
 router.get('/getFilialByUserPhone', async (req, res) => {

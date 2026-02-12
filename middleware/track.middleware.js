@@ -43,7 +43,7 @@ const updateTrack = async (req, res, next) => {
             await existingTrack.save();
 
             // Отправляем уведомления пользователям, у которых есть этот трек в закладках
-            await sendTrackNotifications(track, statusObj);
+            await sendTrackNotifications(track, statusObj, date);
 
             return res.status(200).json({ message: 'Данные трека успешно обновлены' });
         }
@@ -56,8 +56,18 @@ const updateTrack = async (req, res, next) => {
 };
 
 // Функция для отправки уведомлений пользователям
-async function sendTrackNotifications(trackNumber, statusObj) {
+async function sendTrackNotifications(trackNumber, statusObj, historyDate) {
     try {
+        // Проверяем, прошла ли уже дата статуса
+        if (historyDate) {
+            const statusDate = new Date(historyDate);
+            const now = new Date();
+            if (statusDate > now) {
+                console.log(`⏳ Статус ${statusObj?.statusText} для трека ${trackNumber} имеет будущую дату ${historyDate}, уведомление не отправляется`);
+                return; // Не отправляем уведомление, так как дата еще не наступила
+            }
+        }
+
         // Находим всех пользователей, у которых этот трек в закладках
         const users = await User.find({ 
             'bookmarks.trackNumber': trackNumber 
@@ -149,7 +159,7 @@ const excelTrack = async (req, res, next) => {
         // Отправляем уведомления для всех обновленных треков
         console.log(`📬 Отправка уведомлений для ${existingTrackNumbers.length} треков...`);
         const notificationPromises = existingTrackNumbers.map(trackNumber => 
-            sendTrackNotifications(trackNumber, statusObj).catch(err => {
+            sendTrackNotifications(trackNumber, statusObj, date).catch(err => {
                 console.error(`❌ Ошибка при отправке уведомлений для трека ${trackNumber}:`, err.message);
             })
         );

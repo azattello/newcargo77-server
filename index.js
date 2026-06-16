@@ -70,39 +70,39 @@ app.get('/api/download/:filename', (req, res) => {
 });
 
 // Запуск сервера
-// const start = async () => {
-//     try {
-//         await mongoose.connect(config.get('dbUrl'));
-//         app.listen(PORT, () => {
-//             console.log("Server started on the port ", PORT);
-//         });
-//     } catch (error) {
-//         console.log(error);
-//     }
-// };
+const start = async () => {
+    try {
+        await mongoose.connect(config.get('dbUrl'));
+        app.listen(PORT, () => {
+            console.log("Server started on the port ", PORT);
+        });
+    } catch (error) {
+        console.log(error);
+    }
+};
 
 
 
 
 // HTTPS options
-const httpsOptions = {
-    key: fs.readFileSync('/etc/letsencrypt/live/cargo77.kz/privkey.pem'),
-    cert: fs.readFileSync('/etc/letsencrypt/live/cargo77.kz/fullchain.pem')
-};
+// const httpsOptions = {
+//     key: fs.readFileSync('/etc/letsencrypt/live/cargo77.kz/privkey.pem'),
+//     cert: fs.readFileSync('/etc/letsencrypt/live/cargo77.kz/fullchain.pem')
+// };
 
-const start = async () => {
-    try {
-        await mongoose.connect(config.get('dbUrl'));
+// const start = async () => {
+//     try {
+//         await mongoose.connect(config.get('dbUrl'));
 
-        // Create HTTPS server
-        https.createServer(httpsOptions, app).listen(PORT, () => {
-            console.log("Server started on the port ", PORT);
-        });
+//         // Create HTTPS server
+//         https.createServer(httpsOptions, app).listen(PORT, () => {
+//             console.log("Server started on the port ", PORT);
+//         });
         
-    } catch (error) {
-        console.log(error);
-    }
-}
+//     } catch (error) {
+//         console.log(error);
+//     }
+// }
 
 
 start();

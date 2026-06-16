@@ -22,16 +22,21 @@ router.post('/:userId/bookmarks', async (req, res) => {
             return res.status(404).json({ message: 'Пользователь не найден' });
         }
 
-        // Нормализуем трек-номер
         const normalize = (s = '') => String(s).replace(/\s+/g, '').toUpperCase();
         const normalized = normalize(trackNumber);
 
-        // Проверяем, не существует ли уже закладка с таким нормализованным трек-номером
         if (user.bookmarks.some(b => (b.trackNormalized || normalize(b.trackNumber)) === normalized)) {
             return res.status(400).json({ message: 'Закладка с таким трек-номером уже существует' });
         }
 
-        const newBookmark = { description, trackNumber, trackNormalized: normalized };
+        const newBookmark = { description, trackNumber, trackNormalized: normalized, currentStatus: null };
+
+        const existingTrack = await Track.findOne({ trackNormalized: normalized }).populate('status').populate('history.status');
+        if (existingTrack) {
+            newBookmark.trackId = existingTrack._id;
+            newBookmark.currentStatus = existingTrack.status && existingTrack.status._id ? existingTrack.status._id : existingTrack.status;
+        }
+
         user.bookmarks.push(newBookmark);
         await user.save();
 
@@ -97,6 +102,8 @@ router.get('/:userId/getBookmarks', async (req, res) => {
     const page = Math.max(parseInt(req.query.page) || 1, 1);
     const limit = Math.max(parseInt(req.query.limit) || 25, 1);
     const historyLimit = Math.max(parseInt(req.query.historyLimit) || 5, 1);
+    const statusFilter = String(req.query.status || '').trim();
+    const searchQuery = String(req.query.search || '').trim();
 
     try {
         const user = await User.findById(userId);
@@ -104,196 +111,129 @@ router.get('/:userId/getBookmarks', async (req, res) => {
             return res.status(404).json({ message: 'Пользователь не найден' });
         }
 
-        const bookmarks = user.bookmarks || [];
-        const allBookmarks = [];
-
-        await Promise.all(bookmarks.map(async (bookmark) => {
-            const formattedTrackNumber = String(bookmark.trackNumber || '').replace(/\s+/g, '').toLowerCase();
-            // Подгружаем статус и историю статусов, чтобы вернуть statusText/statusNumber
-            const track = await Track.findOne({ track: { $regex: new RegExp(formattedTrackNumber, 'i') } }).populate('status').populate('history.status');
-
-            if (!track) {
-                allBookmarks.push({
-                    type: 'notFound',
-                    _id: bookmark._id,
-                    trackNumber: bookmark.trackNumber,
-                    currentStatus: null,
-                    createdAt: bookmark.createdAt,
-                    description: bookmark.description
-                });
-            } else {
-                // Для хранения в пользователе — сохраняем только ObjectId статуса
-                bookmark.trackId = track._id;
-                bookmark.currentStatus = track.status && track.status._id ? track.status._id : track.status;
-
-                // Фильтруем историю - показываем только прошедшие статусы (дата не в будущем)
-                const fullHistory = Array.isArray(track.history) ? track.history : [];
-                const now = new Date();
-                const filteredHistory = fullHistory.filter(h => {
-                    if (!h.date) return true; // Если нет даты, показываем
-                    const historyDate = new Date(h.date);
-                    return historyDate <= now; // Только если дата прошла
-                });
-
-                // Определяем currentStatus: если последний статус в будущем, используем предыдущий
-                let currentStatusForBookmark = track.status;
-                if (track.history && track.history.length > 0) {
-                    const lastHistoryItem = track.history[track.history.length - 1];
-                    if (lastHistoryItem.date) {
-                        const lastHistoryDate = new Date(lastHistoryItem.date);
-                        if (lastHistoryDate > now) {
-                            // Последний статус в будущем, берем предпоследний
-                            const lastVisibleHistory = filteredHistory[filteredHistory.length - 1];
-                            if (lastVisibleHistory && lastVisibleHistory.status) {
-                                currentStatusForBookmark = lastVisibleHistory.status;
-                            }
-                        }
-                    }
-                }
-
-                // Ограничиваем отфильтрованную историю до последних historyLimit записей
-                const hasMoreHistory = filteredHistory.length > historyLimit;
-                const history = filteredHistory.slice(-historyLimit);
-
-                // В ответ отправляем populated status и ограниченную историю (history.status — тоже populated)
-                allBookmarks.push({
-                    type: 'found',
-                    _id: bookmark._id,
-                    trackNumber: bookmark.trackNumber,
-                    currentStatus: currentStatusForBookmark,
-                    description: bookmark.description,
-                    history,
-                    hasMoreHistory,
-                    createdAt: bookmark.createdAt
-                });
-            }
-        }));
-
-        // Сохраняем пользователя с обновленными данными закладок (trackId/currentStatus)
-        await user.save();
-
-        // ✅ Проверяем "созревшие" статусы (у которых дата уже прошла, но они еще не уведомлены)
-        const Notification = require('../models/Notification');
-        const { sendPushToUser } = require('../utils/pushHelper');
+        const normalize = (value = '') => String(value).replace(/\s+/g, '').toUpperCase();
         const now = new Date();
 
-        for (const bookmark of bookmarks) {
-            const formattedTrackNumber = String(bookmark.trackNumber || '').replace(/\s+/g, '').toLowerCase();
-            const track = await Track.findOne({ track: { $regex: new RegExp(formattedTrackNumber, 'i') } }).populate('history.status', 'statusText');
+        const bookmarks = user.bookmarks || [];
+        const normalizedTrackNumbers = [...new Set(bookmarks.map(bookmark => normalize(bookmark.trackNormalized || bookmark.trackNumber || '')))].filter(Boolean);
 
-            if (track && track.history && track.history.length > 0) {
-                // Ищем статусы, которые "созрели" (дата прошла) и еще не были уведомлены
-                const ripeStatuses = track.history.filter(h => {
-                    if (!h.date || !h._id) return false;
-                    const historyDate = new Date(h.date);
-                    const isRipe = historyDate <= now;
-                    const isNotNotified = !track.notifiedHistoryIds || !track.notifiedHistoryIds.includes(h._id);
-                    return isRipe && isNotNotified;
-                });
+        const tracks = normalizedTrackNumbers.length > 0
+            ? await Track.find({ trackNormalized: { $in: normalizedTrackNumbers } }).populate('status').populate('history.status')
+            : [];
 
-                // Если есть созревшие статусы, отправляем уведомление
-                if (ripeStatuses.length > 0) {
-                    const lastRipeStatus = ripeStatuses[ripeStatuses.length - 1];
-                    const statusText = lastRipeStatus.status?.statusText || 'Статус обновлён';
-                    const message = `трек ${bookmark.trackNumber} - добавлен новый статус ${statusText}`;
+        const trackMap = new Map(tracks.map(track => [track.trackNormalized, track]));
+        const trackById = new Map(tracks.map(track => [String(track._id), track]));
 
-                    try {
-                        // Создаем уведомление
-                        const notification = new Notification({
-                            userId: userId,
-                            type: 'parcels',
-                            title: 'Обновление статуса посылки',
-                            message,
-                            isRead: false,
-                            data: {
-                                trackNumber: bookmark.trackNumber,
-                                status: statusText,
-                                statusId: lastRipeStatus.status?._id
-                            }
-                        });
-
-                        await notification.save();
-                        console.log(`✅ Уведомление о созревшем статусе создано для пользователя ${userId}, трек ${bookmark.trackNumber}`);
-                        
-                        // Отправляем push уведомление
-                        await sendPushToUser(user, 'Обновление статуса посылки', message, {
-                            trackNumber: bookmark.trackNumber,
-                            status: statusText
-                        });
-
-                        // Добавляем все "созревшие" статусы в notifiedHistoryIds
-                        const ripeStatusIds = ripeStatuses.map(h => h._id);
-                        track.notifiedHistoryIds = [...(track.notifiedHistoryIds || []), ...ripeStatusIds];
-                        await track.save();
-                    } catch (err) {
-                        console.error(`❌ Ошибка при отправке уведомления для трека ${bookmark.trackNumber}:`, err.message);
-                    }
-                }
-            }
-        }
-
-        // ✅ Подсчитываем статусы для ВСЕХ закладок (не только текущей страницы) - только ВИДИМЫЕ статусы
+        let isUserModified = false;
         const statusCounts = {};
         let notFoundCount = 0;
 
-        await Promise.all(
-          bookmarks.map(async (bookmark) => {
-            const formattedTrackNumber = String(bookmark.trackNumber || '').replace(/\s+/g, '').toLowerCase();
-            const track = await Track.findOne({ track: { $regex: new RegExp(formattedTrackNumber, 'i') } }).populate('status', 'statusText').populate('history.status', 'statusText').lean();
+        const allBookmarks = bookmarks.map(bookmark => {
+            const normalized = normalize(bookmark.trackNormalized || bookmark.trackNumber || '');
+
+            if (!bookmark.trackNormalized || bookmark.trackNormalized !== normalized) {
+                bookmark.trackNormalized = normalized;
+                isUserModified = true;
+            }
+
+            const track = bookmark.trackId ? trackById.get(String(bookmark.trackId)) : trackMap.get(normalized);
+            const baseBookmark = {
+                _id: bookmark._id,
+                trackNumber: bookmark.trackNumber,
+                description: bookmark.description,
+                createdAt: bookmark.createdAt,
+                currentStatus: null,
+                currentStatusText: 'Добавлен в базу',
+                history: [],
+                hasMoreHistory: false,
+                type: 'notFound',
+            };
 
             if (!track) {
-              notFoundCount++;
-            } else {
-              // Фильтруем историю - считаем только прошедшие статусы
-              const now = new Date();
-              const fullHistory = Array.isArray(track.history) ? track.history : [];
-              const filteredHistory = fullHistory.filter(h => {
-                if (!h.date) return true;
-                const historyDate = new Date(h.date);
-                return historyDate <= now;
-              });
-
-              // Определяем видимый статус
-              let visibleStatus = track.status;
-              if (track.history && track.history.length > 0) {
-                const lastHistoryItem = track.history[track.history.length - 1];
-                if (lastHistoryItem.date) {
-                  const lastHistoryDate = new Date(lastHistoryItem.date);
-                  if (lastHistoryDate > now) {
-                    // Последний статус в будущем, берем предпоследний видимый
-                    const lastVisibleHistory = filteredHistory[filteredHistory.length - 1];
-                    if (lastVisibleHistory && lastVisibleHistory.status) {
-                      visibleStatus = lastVisibleHistory.status;
-                    }
-                  }
-                }
-              }
-
-              if (visibleStatus && visibleStatus.statusText) {
-                const statusText = visibleStatus.statusText;
-                statusCounts[statusText] = (statusCounts[statusText] || 0) + 1;
-              }
+                notFoundCount += 1;
+                return baseBookmark;
             }
-          })
-        );
+
+            if (!bookmark.trackId || String(bookmark.trackId) !== String(track._id)) {
+                bookmark.trackId = track._id;
+                isUserModified = true;
+            }
+
+            const historyEntries = Array.isArray(track.history) ? track.history.slice() : [];
+            const visibleHistory = historyEntries
+                .filter(entry => !entry.date || new Date(entry.date) <= now)
+                .sort((a, b) => new Date(a.date || 0) - new Date(b.date || 0));
+
+            if (visibleHistory.length === 0 && track.status) {
+                visibleHistory.push({ status: track.status, date: track.updatedAt || track.createdAt || new Date() });
+            }
+
+            const limitedHistory = visibleHistory.slice(-historyLimit);
+            const lastVisible = limitedHistory[limitedHistory.length - 1] || visibleHistory[visibleHistory.length - 1] || null;
+            const statusObject = lastVisible && lastVisible.status ? lastVisible.status : track.status;
+            const statusText = statusObject && statusObject.statusText ? statusObject.statusText : 'Неизвестен';
+            const statusId = statusObject && statusObject._id ? statusObject._id : null;
+            const lastUpdateAt = lastVisible && lastVisible.date ? lastVisible.date : track.updatedAt || track.createdAt || bookmark.createdAt;
+
+            if (!bookmark.currentStatus || String(bookmark.currentStatus) !== String(statusId)) {
+                bookmark.currentStatus = statusId;
+                isUserModified = true;
+            }
+
+            statusCounts[statusText] = (statusCounts[statusText] || 0) + 1;
+
+            return {
+                ...baseBookmark,
+                type: 'found',
+                currentStatus: statusId,
+                currentStatusText: statusText,
+                history: limitedHistory,
+                hasMoreHistory: visibleHistory.length > historyLimit,
+                lastUpdateAt,
+            };
+        });
+
+        if (isUserModified) {
+            await user.save();
+        }
 
         statusCounts['Добавлен в базу'] = notFoundCount;
 
-        // Пагинация по всем закладкам (found + notFound)
-        const total = allBookmarks.length;
-        const totalPages = Math.ceil(total / limit) || 1;
-        const startIndex = (page - 1) * limit;
-        const paginated = allBookmarks.slice(startIndex, startIndex + limit);
+        let filteredBookmarks = allBookmarks;
+        if (searchQuery) {
+            const normalizedSearch = normalize(searchQuery);
+            filteredBookmarks = filteredBookmarks.filter(bookmark => {
+                const trackMatch = bookmark.trackNumber && normalize(bookmark.trackNumber).includes(normalizedSearch);
+                const descriptionMatch = bookmark.description && String(bookmark.description).toLowerCase().includes(searchQuery.toLowerCase());
+                return trackMatch || descriptionMatch;
+            });
+        }
 
-        const notFoundBookmarks = paginated.filter(b => b.type === 'notFound').map(({ type, ...rest }) => rest);
-        const updatedBookmarks = paginated.filter(b => b.type === 'found').map(({ type, ...rest }) => rest);
+        if (statusFilter) {
+            filteredBookmarks = statusFilter === 'Добавлен в базу'
+                ? filteredBookmarks.filter(bookmark => bookmark.type === 'notFound')
+                : filteredBookmarks.filter(bookmark => bookmark.currentStatusText === statusFilter);
+        }
 
-        return res.status(200).json({ 
-          notFoundBookmarks, 
-          updatedBookmarks, 
-          totalPages,
-          totalBookmarks: total,
-          statusCounts,  // ✅ Возвращаем подсчет по ВСЕМ статусам
+        const sortedBookmarks = filteredBookmarks.slice().sort((a, b) => {
+            const aDate = new Date(a.lastUpdateAt || a.createdAt || 0);
+            const bDate = new Date(b.lastUpdateAt || b.createdAt || 0);
+            return bDate - aDate;
+        });
+
+        const total = sortedBookmarks.length;
+        const totalPages = Math.max(Math.ceil(total / limit), 1);
+        const paginated = sortedBookmarks.slice((page - 1) * limit, page * limit);
+
+        const notFoundBookmarks = paginated.filter(bookmark => bookmark.type === 'notFound').map(({ type, ...rest }) => rest);
+        const updatedBookmarks = paginated.filter(bookmark => bookmark.type === 'found').map(({ type, ...rest }) => rest);
+
+        return res.status(200).json({
+            notFoundBookmarks,
+            updatedBookmarks,
+            totalPages,
+            totalBookmarks: total,
+            statusCounts,
         });
     } catch (error) {
         console.error('Ошибка при получении закладок пользователя:', error.message);

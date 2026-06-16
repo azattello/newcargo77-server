@@ -112,8 +112,8 @@ router.get('/history/:trackNumber', async (req, res) => {
   const { trackNumber } = req.params;
 
   try {
-    const formatted = String(trackNumber).replace(/\s+/g, '').toLowerCase();
-    const track = await Track.findOne({ track: { $regex: new RegExp(formatted, 'i') } }).populate('status').populate('history.status');
+    const formatted = String(trackNumber).replace(/\s+/g, '').toUpperCase();
+    const track = await Track.findOne({ trackNormalized: formatted }).populate('status').populate('history.status');
 
     if (!track) {
       return res.status(404).json({ message: 'Track not found' });
